@@ -798,6 +798,7 @@ CacheStreamRunner::CacheStreamRunner(
     // attn_mask sizing and chunk-shift math. Same derivation the encoder uses
     // (make_cache_aware_config), so the two can't drift.
     enc_cfg_ = make_cache_aware_config(model->encoder_config(), right_ctx);
+    legacy_first_chunk_ = cfg.streaming.legacy_first_chunk_zero_pad;
 
     // The per-stream K/V/conv cache is device-resident (cache_state_), allocated
     // lazily on first encode. Only attn_mask stays host-side - it's a per-call
@@ -877,10 +878,14 @@ CacheStreamRunner::feed_audio(const float* samples, size_t n_samples) {
 int
 CacheStreamRunner::next_chunk_mel_frames() const {
     // Preserve the existing overlap and steady-state formula; only startup
-    // uses the shorter causal chunk.
-    return first_chunk_ ? enc_cfg_.cache_first_chunk_mel_frames()
-                        : pre_encode_cache_size_ +
-                              enc_cfg_.subsampling_factor * (1 + enc_cfg_.cache_right_ctx);
+    // uses the shorter causal chunk. Legacy mode keeps the steady shape even
+    // for the first chunk, which is what makes the encoder apply
+    // cache_drop_extra to it and consume the stream-start zero pad.
+    const int steady = pre_encode_cache_size_ +
+                       enc_cfg_.subsampling_factor * (1 + enc_cfg_.cache_right_ctx);
+    if (legacy_first_chunk_)
+        return steady;
+    return first_chunk_ ? enc_cfg_.cache_first_chunk_mel_frames() : steady;
 }
 
 void
@@ -953,7 +958,14 @@ CacheStreamRunner::process_one_chunk() {
 
     // Advance mel buffer: drop shift_size_mel; keep overlap_mel_frames at
     // the head so the next chunk's leading frames see the same context.
-    if (first_chunk_) {
+    if (legacy_first_chunk_) {
+        // Every chunk, including the first, advances by the steady shift: the
+        // pad already supplied the overlap the first chunk would otherwise
+        // lack.
+        first_chunk_ = false;
+        const size_t shift_floats = static_cast<size_t>(shift_size_mel) * n_mels;
+        mel_offset_ = std::min(mel_offset_ + shift_floats, mel_buf_.size());
+    } else if (first_chunk_) {
         first_chunk_ = false;
         if (chunk_size_mel < pre_encode_cache_size_) {
             // R=0 begins with one real mel frame. Its first subsequent chunk
@@ -1022,6 +1034,16 @@ CacheStreamRunner::step() {
     // step() call.
     last_step_new_tokens_.clear();
     while (static_cast<int>((mel_buf_.size() - mel_offset_) / n_mels) >= next_chunk_mel_frames()) {
+        if (legacy_first_chunk_ && !stream_zero_padded_) {
+            // Pre-fix behaviour: prepend the overlap as zero mel so the
+            // encoder's unconditional cache_drop_extra eats padding rather
+            // than the leading 160 ms of real audio. Done here, not in the
+            // ctor, so it lands immediately before the first real encode.
+            compact_mel_buffer();
+            mel_buf_.insert(
+                mel_buf_.begin(), static_cast<size_t>(pre_encode_cache_size_) * n_mels, 0.0f);
+            stream_zero_padded_ = true;
+        }
         process_one_chunk();
         if (poll_endpoint(update, /*after_chunk=*/true))
             break;
@@ -1222,6 +1244,7 @@ CacheStreamRunner::reset() {
     finalized_ = false;
     finalizing_ = false;
     first_chunk_ = true;
+    stream_zero_padded_ = false;
     zero_caches();
     std::fill(attn_mask_.begin(), attn_mask_.end(), 0.0f);
     if (head_)

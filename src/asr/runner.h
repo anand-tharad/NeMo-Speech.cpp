@@ -32,6 +32,25 @@ struct StreamingConfig {
     // A trained cache-aware right-context mode in encoder frames. -1 uses the
     // value stored in the model.
     int rnnt_right_context = 1;
+    // Stream-startup geometry for the cache-aware encoder.
+    //
+    // false (upstream, since "fix(asr): correct streaming startup and Q8
+    //   pointwise precision"): the first chunk is the shorter causal shape
+    //   1 + subsampling_factor*R, which already yields exactly 1+R encoder
+    //   frames, so the encoder skips cache_drop_extra for it. Nothing is
+    //   invented and encoder frame 0 covers real audio from sample 0.
+    //
+    // true (pre-fix behaviour): every chunk including the first uses the
+    //   steady-state shape, and pre_encode_cache_size zero mel frames are
+    //   prepended once at stream start so the unconditional cache_drop_extra
+    //   discards that padding instead of the leading 160 ms of speech.
+    //
+    // The two place a different number of real mel frames behind every
+    // encoder frame index, so they diverge for the whole utterance, most
+    // visibly at its start. Keep this only to reproduce transcripts measured
+    // against a pre-fix build; it also feeds the encoder zero log-mel, which
+    // is unit energy rather than silence.
+    bool legacy_first_chunk_zero_pad = false;
     void Register(common::ParameterParser& p) {
         p.Register("chunk_size", &chunk_size, "CTC buffered chunk size (s)", {"--chunk-sec"});
         p.Register(
@@ -43,6 +62,11 @@ struct StreamingConfig {
         p.Register(
             "rnnt_right_context", &rnnt_right_context,
             "RNNT cache-aware right context (encoder frames; -1 = model default)");
+        p.Register(
+            "legacy_first_chunk_zero_pad", &legacy_first_chunk_zero_pad,
+            "Reproduce pre-fix stream startup: steady-shape first chunk preceded by "
+            "zero mel padding (diverges from upstream for the whole utterance)",
+            {"--legacy-first-chunk-zero-pad"});
     }
 };
 
@@ -364,6 +388,10 @@ class CacheStreamRunner final : public AsrRunner {
     // Reset at an encoder-state boundary, independently of the absolute stream
     // frame clock. The first chunk has no pre-encoder overlap to discard.
     bool first_chunk_ = true;
+    // StreamingConfig::legacy_first_chunk_zero_pad, copied at construction.
+    bool legacy_first_chunk_ = false;
+    // Legacy mode only: the one-time stream-start zero pad has been inserted.
+    bool stream_zero_padded_ = false;
 
     // Encoder output from most recent chunk (column-major (d_model, T_out)).
     std::vector<float> last_enc_out_;

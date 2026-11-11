@@ -233,6 +233,14 @@ class RnntGreedyDecoder : public Decoder {
     double bias_max_boost_ = 5.0;           // greedy-safe upper clamp on the request boost
     std::vector<float> bias_scratch_;       // dense per-round joint-logit bias
     std::vector<int32_t> boost_token_ids_;  // blank-excluded re-rank pass output
+
+    // --blank-penalty: a dense logit bias, zero everywhere except
+    // -blank_penalty at blank_id. Built once in the constructor and reused for
+    // every joint evaluation, since it never changes. Left empty when the
+    // penalty is 0, which keeps the nullptr-bias path (and its joint graph
+    // key) exactly as it was for the default configuration.
+    float blank_penalty_ = 0.0f;
+    std::vector<float> blank_bias_;
 };
 
 // Token-and-Duration Transducer greedy decoder. Predictor state commits only

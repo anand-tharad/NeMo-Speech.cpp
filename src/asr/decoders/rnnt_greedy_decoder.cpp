@@ -50,7 +50,22 @@ is_class_hint(const std::string& s) {
 RnntGreedyDecoder::RnntGreedyDecoder(RnntEngine* engine, const DecoderConfig& cfg)
     : engine_(engine), bias_alpha_cfg_(static_cast<float>(cfg.boosting_tree_alpha)),
       bias_depth_scaling_(static_cast<float>(cfg.boosting_depth_scaling)),
-      bias_max_boost_(cfg.boosting_max_boost) {
+      bias_max_boost_(cfg.boosting_max_boost),
+      blank_penalty_(static_cast<float>(cfg.blank_penalty)) {
+    if (blank_penalty_ != 0.0f) {
+        const auto& rnnt_cfg = engine_->rnnt_config();
+        if (rnnt_cfg.is_tdt()) {
+            // joint_tdt_argmax takes no bias and the TDT joint tail throws on
+            // one; say so rather than silently decoding without the penalty.
+            std::fprintf(
+                stderr,
+                "warning: decoder.blank_penalty is not supported for TDT models; ignoring it\n");
+            blank_penalty_ = 0.0f;
+        } else {
+            blank_bias_.assign(static_cast<size_t>(rnnt_cfg.vocab_size), 0.0f);
+            blank_bias_[static_cast<size_t>(rnnt_cfg.blank_id)] = -blank_penalty_;
+        }
+    }
     reset();
 }
 
@@ -242,6 +257,10 @@ RnntGreedyDecoder::step_impl(
     token_ids_.resize(static_cast<size_t>(T));
     int t = 0;
     int symbols_at_frame = 0;
+    // Applied to the pass that decides blank vs non-blank. nullptr when the
+    // penalty is disabled, so the default path and its joint graph key stay
+    // exactly what they were before this option existed.
+    const float* const blank_bias = blank_bias_.empty() ? nullptr : blank_bias_.data();
     while (t < T) {
         const int remaining = T - t;
         const float* boost_bias = nullptr;
@@ -268,7 +287,7 @@ RnntGreedyDecoder::step_impl(
         if (!predictor_valid_ && device_enc_out != nullptr && boost_bias == nullptr) {
             engine_->predict_and_joint_rnnt_argmax_device(
                 *stream_state_, prev_token_, active_bank_, *device_enc_out, t, d_model, remaining,
-                token_ids_.data());
+                token_ids_.data(), blank_bias);
             ++stats_.predictor_calls;
             ++stats_.joint_calls;
             stats_.joint_frames += static_cast<uint64_t>(remaining);
@@ -285,11 +304,12 @@ RnntGreedyDecoder::step_impl(
         if (!joint_complete) {
             if (device_enc_out != nullptr) {
                 engine_->joint_argmax_device(
-                    *stream_state_, *device_enc_out, t, d_model, remaining, token_ids_.data());
+                    *stream_state_, *device_enc_out, t, d_model, remaining, token_ids_.data(),
+                    blank_bias);
             } else {
                 engine_->joint_argmax(
                     *stream_state_, enc_out + static_cast<size_t>(t) * d_model, d_model, remaining,
-                    token_ids_.data());
+                    token_ids_.data(), blank_bias);
             }
             ++stats_.joint_calls;
             stats_.joint_frames += static_cast<uint64_t>(remaining);

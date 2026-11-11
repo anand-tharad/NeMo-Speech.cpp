@@ -48,6 +48,15 @@ struct DecoderConfig {
     // the boosted words insert spuriously / repeat. 5.0 keeps enough headroom
     // for harder words while staying well below riva's beam-oriented 10.
     double boosting_max_boost = 5.0;
+    // Constant subtracted from the blank logit before the RNNT greedy argmax.
+    // 0 disables it (unbiased decoding). A positive value makes blank less
+    // attractive, recovering tokens a cache-aware streaming transducer
+    // suppresses under limited right context; too large a value inserts
+    // spurious tokens in silence, since greedy decoding has no competing
+    // hypothesis to absorb the bias. Useful range is roughly 0.5-3.0; measure
+    // WER rather than guessing. RNNT only -- the TDT joint rejects a logit
+    // bias.
+    double blank_penalty = 0.0;
     void Register(common::ParameterParser& p) {
         p.Register(
             "kind",
@@ -94,6 +103,10 @@ struct DecoderConfig {
             "boosting_max_boost", &boosting_max_boost,
             "Upper clamp on the RNNT word-boosting alpha (greedy-safe default 5.0)",
             {"--boosting-max-boost"});
+        p.Register(
+            "blank_penalty", &blank_penalty,
+            "RNNT: subtract this from the blank logit before the greedy argmax (0 disables)",
+            {"--blank-penalty"});
     }
 };
 

@@ -86,6 +86,8 @@ to_config(const nemo_speech_asr_recognizer_config* c) {
             cfg.streaming.ctc_right_padding = e->ctc_right_padding;
         if (HAS_FIELD(e, nemo_speech_asr_streaming_config, rnnt_right_context))
             cfg.streaming.rnnt_right_context = e->rnnt_right_context;
+        if (HAS_FIELD(e, nemo_speech_asr_streaming_config, legacy_first_chunk_zero_pad))
+            cfg.streaming.legacy_first_chunk_zero_pad = e->legacy_first_chunk_zero_pad;
     }
     if (HAS_FIELD(c, nemo_speech_asr_recognizer_config, decoder) && c->decoder) {
         const auto* d = c->decoder;

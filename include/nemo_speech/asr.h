@@ -73,6 +73,14 @@ typedef struct nemo_speech_asr_streaming_config {
     float ctc_left_padding;      // s
     float ctc_right_padding;     // s
     int32_t rnnt_right_context;  // encoder frames; -1 = model default
+    // Reproduce the cache-aware stream startup used before the upstream
+    // streaming-startup fix: every chunk including the first takes the
+    // steady-state shape, preceded once by pre_encode_cache_size zero mel
+    // frames so the encoder's cache_drop_extra discards padding instead of the
+    // leading speech. Changes the mel-to-encoder-frame alignment for the whole
+    // utterance, so it is only for reproducing transcripts measured against a
+    // pre-fix build. Default false = upstream behaviour.
+    bool legacy_first_chunk_zero_pad;
 } nemo_speech_asr_streaming_config;
 
 typedef struct nemo_speech_asr_decoder_config {

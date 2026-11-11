@@ -322,6 +322,7 @@ class MockRnntEngine : public RnntEngine {
         } else {
             last_logit_bias.clear();
         }
+        bias_log.push_back(last_logit_bias);
         std::vector<int> round;
         if (!rounds.empty()) {
             round = std::move(rounds.front());
@@ -336,6 +337,18 @@ class MockRnntEngine : public RnntEngine {
         throw std::runtime_error("RNNT mock does not implement TDT");
     }
 
+    // Word boosting needs a tokenizer to build a non-empty tree. Map any phrase
+    // onto a fixed two-token sequence so bias_on_ can be reached model-free.
+    std::vector<int> encode_phrase(const std::string& text) const override {
+        if (text.empty())
+            return {};
+        return {0, 1};
+    }
+
+    // Make the mock advertise itself as a Token-and-Duration Transducer, to
+    // exercise the blank-penalty TDT guard.
+    void set_durations(std::vector<int32_t> d) { cfg_.durations = std::move(d); }
+
     std::deque<std::vector<int>> rounds;
     int last_prev_token = -100;
     float last_h_in = -1.0f;
@@ -343,6 +356,10 @@ class MockRnntEngine : public RnntEngine {
     int predictor_calls = 0;
     int joint_calls = 0;
     std::vector<float> last_logit_bias;
+    // Every bias seen, in call order; an empty entry means nullptr was passed.
+    // One step() can run two joint passes with different biases, so only a log
+    // can show which pass received which.
+    std::vector<std::vector<float>> bias_log;
 
    private:
     RnntConfig cfg_;
@@ -796,6 +813,127 @@ test_tdt_duration_crosses_step_boundary() {
     check(dec.last_emit_frame() == 2, "tdt: carries duration across step boundaries");
 }
 
+// ---------------------------------------------------------------------------
+// decoder.blank_penalty. The joint already accepts a dense per-vocabulary
+// logit bias (added to the logits immediately before the argmax, see
+// rnnt_modules.cpp build_joint_tail); the penalty is that bias with
+// -blank_penalty at blank_id. These checks pin the contract rather than the
+// decoded text, because the mock records the bias instead of applying it.
+// ---------------------------------------------------------------------------
+void
+test_rnnt_blank_penalty() {
+    const std::vector<float> enc(4 * 3, 0.0f);  // 3 frames at joint_dim 4
+
+    // Disabled by default: nullptr must still be passed, so the joint graph key
+    // (which is keyed on whether a bias is present) is unchanged for every
+    // existing deployment.
+    {
+        MockRnntEngine eng;
+        RnntGreedyDecoder dec(&eng);
+        dec.step(enc.data(), 4, 3, 0);
+        check(
+            eng.bias_log.size() == 1 && eng.bias_log[0].empty(),
+            "blank_penalty: default config passes no logit bias");
+    }
+
+    // Explicit zero is the same as absent -- not a vector of zeros, which would
+    // needlessly take the biased graph path.
+    {
+        MockRnntEngine eng;
+        DecoderConfig cfg;
+        cfg.blank_penalty = 0.0;
+        RnntGreedyDecoder dec(&eng, cfg);
+        dec.step(enc.data(), 4, 3, 0);
+        check(
+            eng.bias_log.size() == 1 && eng.bias_log[0].empty(),
+            "blank_penalty: 0.0 passes no logit bias");
+    }
+
+    // Enabled: exactly one non-zero entry, -penalty, at blank_id.
+    {
+        MockRnntEngine eng;
+        const int blank = eng.rnnt_config().blank_id;
+        const int vocab = eng.rnnt_config().vocab_size;
+        DecoderConfig cfg;
+        cfg.blank_penalty = 1.5;
+        RnntGreedyDecoder dec(&eng, cfg);
+        dec.step(enc.data(), 4, 3, 0);
+
+        const std::vector<float>& bias = eng.last_logit_bias;
+        const bool sized = static_cast<int>(bias.size()) == vocab;
+        check(sized, "blank_penalty: bias is one float per vocabulary entry");
+        check(sized && near(bias[blank], -1.5f), "blank_penalty: blank logit biased by -penalty");
+        bool rest_zero = sized;
+        for (int i = 0; sized && i < vocab; ++i) {
+            if (i != blank && bias[i] != 0.0f)
+                rest_zero = false;
+        }
+        check(rest_zero, "blank_penalty: no non-blank token is biased");
+    }
+
+    // The bias is not consumed by the first joint call. An emission invalidates
+    // the predictor and starts a fresh round at the same frame; that round must
+    // carry the penalty too, or the bias would silently apply only to the
+    // leading blank run.
+    {
+        MockRnntEngine eng;
+        const int blank = eng.rnnt_config().blank_id;
+        DecoderConfig cfg;
+        cfg.blank_penalty = 1.5;
+        RnntGreedyDecoder dec(&eng, cfg);
+        eng.rounds = {{0}};  // emit token 0 at frame 0, then an all-blank round
+        const auto emitted = dec.step(enc.data(), 4, 3, 0);
+        check(emitted == std::vector<int>({0}), "blank_penalty: scripted emission still decodes");
+        bool every_round_biased = eng.bias_log.size() >= 2;
+        for (const auto& b : eng.bias_log) {
+            if (b.size() != static_cast<size_t>(eng.rnnt_config().vocab_size) ||
+                !near(b[static_cast<size_t>(blank)], -1.5f))
+                every_round_biased = false;
+        }
+        check(every_round_biased, "blank_penalty: every joint round after an emission is biased");
+    }
+
+    // Composition with context biasing. Boosting runs two passes: an unbiased
+    // one that decides blank vs non-blank, then a blank-excluded one that only
+    // re-ranks the non-blank labels (NeMo/riva rnnt_label_looping semantics).
+    // The penalty belongs to the first; the second keeps blank at -1e30.
+    {
+        MockRnntEngine eng;
+        const int blank = eng.rnnt_config().blank_id;
+        DecoderConfig cfg;
+        cfg.blank_penalty = 1.5;
+        RnntGreedyDecoder dec(&eng, cfg);
+
+        AsrRequestOptions opts;
+        AsrRequestOptions::Boost boost;
+        boost.phrases = {"prabhsimran"};
+        boost.boost = 5.0f;
+        opts.speech_contexts = {boost};
+        dec.set_request_options(opts);
+
+        dec.step(enc.data(), 4, 3, 0);
+        check(eng.bias_log.size() == 2, "blank_penalty: boosting still runs two joint passes");
+        const bool ok = eng.bias_log.size() == 2 &&
+                        near(eng.bias_log[0][static_cast<size_t>(blank)], -1.5f) &&
+                        eng.bias_log[1][static_cast<size_t>(blank)] < -1e29f;
+        check(ok, "blank_penalty: penalty on the blank-vs-non-blank pass, exclusion on the re-rank");
+    }
+
+    // TDT: the joint tail throws on a logit bias, so the constructor must
+    // disable the penalty rather than let a decode fail at the first frame.
+    {
+        MockRnntEngine eng;
+        eng.set_durations({0, 1, 2, 4});
+        DecoderConfig cfg;
+        cfg.blank_penalty = 1.5;
+        RnntGreedyDecoder dec(&eng, cfg);
+        dec.step(enc.data(), 4, 3, 0);
+        check(
+            !eng.bias_log.empty() && eng.bias_log[0].empty(),
+            "blank_penalty: ignored for a TDT config instead of reaching the joint");
+    }
+}
+
 }  // namespace
 
 int
@@ -812,6 +950,7 @@ main() {
     test_greedy_open_word_needs_finalize();
     test_rnnt_emission_and_blank();
     test_rnnt_max_symbols_cap();
+    test_rnnt_blank_penalty();
     test_rnnt_finalization_preserves_native_punctuation();
     test_rnnt_stalls_do_not_inject_punctuation();
     test_rnnt_late_punctuation_returns_to_previous_final();

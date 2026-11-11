@@ -934,6 +934,126 @@ test_rnnt_blank_penalty() {
     }
 }
 
+// Per-request blank_penalty (AsrRequestOptions::blank_penalty). The startup key
+// above fixes a penalty for the process; this one lets a single decoder serve
+// several penalties across requests, so one loaded model can be re-decoded at a
+// different penalty instead of hosting a second copy of the weights.
+//
+// Sentinel: negative inherits the configured value. Zero cannot be the sentinel
+// because zero is a real setting -- unbiased decoding -- so these checks pin
+// that an explicit 0 request overrides a non-zero config rather than being
+// read as "unset".
+void
+test_rnnt_blank_penalty_per_request() {
+    const std::vector<float> enc(4 * 3, 0.0f);  // 3 frames at joint_dim 4
+
+    // A request penalty reaches the joint on an otherwise default decoder.
+    {
+        MockRnntEngine eng;
+        const int blank = eng.rnnt_config().blank_id;
+        RnntGreedyDecoder dec(&eng);
+        AsrRequestOptions opts;
+        opts.blank_penalty = 2.0;
+        dec.set_request_options(opts);
+        dec.step(enc.data(), 4, 3, 0);
+        const std::vector<float>& bias = eng.last_logit_bias;
+        check(
+            static_cast<int>(bias.size()) == eng.rnnt_config().vocab_size &&
+                near(bias[blank], -2.0f),
+            "blank_penalty/request: request value reaches the joint");
+    }
+
+    // Default options (negative) inherit the configured penalty rather than
+    // silently disabling it, which would change behaviour for every existing
+    // caller that sets the startup key and sends no override.
+    {
+        MockRnntEngine eng;
+        const int blank = eng.rnnt_config().blank_id;
+        DecoderConfig cfg;
+        cfg.blank_penalty = 1.5;
+        RnntGreedyDecoder dec(&eng, cfg);
+        dec.set_request_options(AsrRequestOptions{});
+        dec.step(enc.data(), 4, 3, 0);
+        check(
+            !eng.last_logit_bias.empty() && near(eng.last_logit_bias[blank], -1.5f),
+            "blank_penalty/request: unset request inherits the configured penalty");
+    }
+
+    // Explicit 0 overrides a non-zero config and must take the nullptr-bias
+    // path, not pass a vector of zeros.
+    {
+        MockRnntEngine eng;
+        DecoderConfig cfg;
+        cfg.blank_penalty = 1.5;
+        RnntGreedyDecoder dec(&eng, cfg);
+        AsrRequestOptions opts;
+        opts.blank_penalty = 0.0;
+        dec.set_request_options(opts);
+        dec.step(enc.data(), 4, 3, 0);
+        check(
+            eng.bias_log.size() == 1 && eng.bias_log[0].empty(),
+            "blank_penalty/request: explicit 0 overrides the config and passes no bias");
+    }
+
+    // Successive requests on one decoder must not contaminate each other: the
+    // whole point is re-decoding the same audio at a different penalty, so a
+    // stale bias would silently corrupt the second attempt.
+    {
+        MockRnntEngine eng;
+        const int blank = eng.rnnt_config().blank_id;
+        DecoderConfig cfg;
+        cfg.blank_penalty = 1.5;
+        RnntGreedyDecoder dec(&eng, cfg);
+
+        AsrRequestOptions first;
+        first.blank_penalty = 2.0;
+        dec.set_request_options(first);
+        dec.step(enc.data(), 4, 3, 0);
+        const bool first_ok =
+            !eng.last_logit_bias.empty() && near(eng.last_logit_bias[blank], -2.0f);
+
+        // Back to an un-overridden request: restores the configured value, not
+        // the previous request's.
+        dec.reset();
+        dec.set_request_options(AsrRequestOptions{});
+        dec.step(enc.data(), 4, 3, 0);
+        const bool second_ok =
+            !eng.last_logit_bias.empty() && near(eng.last_logit_bias[blank], -1.5f);
+
+        check(first_ok, "blank_penalty/request: first request uses its override");
+        check(
+            second_ok,
+            "blank_penalty/request: later request restores the config, not the previous override");
+    }
+
+    // A request penalty of 0 on a default (0) config stays on the unbiased path.
+    {
+        MockRnntEngine eng;
+        RnntGreedyDecoder dec(&eng);
+        AsrRequestOptions opts;
+        opts.blank_penalty = 0.0;
+        dec.set_request_options(opts);
+        dec.step(enc.data(), 4, 3, 0);
+        check(
+            eng.bias_log.size() == 1 && eng.bias_log[0].empty(),
+            "blank_penalty/request: 0 on a default config passes no bias");
+    }
+
+    // TDT rejects a logit bias however the penalty arrives.
+    {
+        MockRnntEngine eng;
+        eng.set_durations({0, 1, 2, 4});
+        RnntGreedyDecoder dec(&eng);
+        AsrRequestOptions opts;
+        opts.blank_penalty = 1.5;
+        dec.set_request_options(opts);
+        dec.step(enc.data(), 4, 3, 0);
+        check(
+            !eng.bias_log.empty() && eng.bias_log[0].empty(),
+            "blank_penalty/request: ignored for TDT even when set per request");
+    }
+}
+
 }  // namespace
 
 int
@@ -951,6 +1071,7 @@ main() {
     test_rnnt_emission_and_blank();
     test_rnnt_max_symbols_cap();
     test_rnnt_blank_penalty();
+    test_rnnt_blank_penalty_per_request();
     test_rnnt_finalization_preserves_native_punctuation();
     test_rnnt_stalls_do_not_inject_punctuation();
     test_rnnt_late_punctuation_returns_to_previous_final();

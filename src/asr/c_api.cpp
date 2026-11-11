@@ -210,6 +210,10 @@ to_options(const nemo_speech_asr_recognition_options* o) {
     if (HAS_FIELD(o, nemo_speech_asr_recognition_options, max_speaker_count) &&
         o->max_speaker_count > 0)
         opts.max_speaker_count = o->max_speaker_count;
+    // No positivity guard: 0 is a meaningful penalty (unbiased) and must reach
+    // the decoder. Only an absent field (older, smaller struct) inherits.
+    if (HAS_FIELD(o, nemo_speech_asr_recognition_options, blank_penalty))
+        opts.blank_penalty = o->blank_penalty;
     if (HAS_FIELD(o, nemo_speech_asr_recognition_options, speech_context_count) &&
         o->speech_contexts) {
         for (size_t i = 0; i < o->speech_context_count; ++i) {
@@ -268,6 +272,9 @@ nemo_speech_asr_recognition_options_default(void) {
     std::memset(&o, 0, sizeof(o));
     o.size = sizeof(o);
     o.max_alternatives = 1;  // 1-best
+    // Negative = inherit the recognizer's configured blank_penalty. Zero is a
+    // real setting (unbiased), so it cannot double as "unset".
+    o.blank_penalty = -1.0;
     return o;
 }
 

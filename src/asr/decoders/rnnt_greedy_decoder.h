@@ -158,6 +158,9 @@ class RnntGreedyDecoder : public Decoder {
     }
     // Build the per-request context-biasing tree from speech_contexts.
     void set_request_options(const AsrRequestOptions& opts) override;
+    // Rebuild blank_bias_ for `penalty`. Shared by the constructor and the
+    // per-request override so both apply the TDT guard identically.
+    void apply_blank_penalty_(double penalty);
     // enc_out: joint encoder projection (joint_dim, T) flat-packed. The model
     // computes it once per chunk, after optional language-prompt fusion.
     std::vector<int> step(const float* enc_out, int d_model, int T, int64_t frame_offset) override;
@@ -240,6 +243,9 @@ class RnntGreedyDecoder : public Decoder {
     // penalty is 0, which keeps the nullptr-bias path (and its joint graph
     // key) exactly as it was for the default configuration.
     float blank_penalty_ = 0.0f;
+    // Startup DecoderConfig value, retained so a request that does not override
+    // the penalty restores it rather than inheriting the previous request's.
+    float blank_penalty_cfg_ = 0.0f;
     std::vector<float> blank_bias_;
 };
 

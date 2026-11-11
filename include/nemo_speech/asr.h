@@ -189,6 +189,19 @@ typedef struct nemo_speech_asr_recognition_options {
     // Sortformer model (four speakers for V2, eight for supported V3).
     bool enable_speaker_diarization;
     int32_t max_speaker_count;
+    // Per-request override of the recognizer's decoder blank_penalty:
+    // subtracted from the blank logit before the RNNT greedy argmax, so larger
+    // means fewer blanks and more tokens. Negative keeps the value the
+    // recognizer was created with; 0 means unbiased decoding, so zero is NOT
+    // the "unset" sentinel. One recognizer can therefore serve several
+    // penalties across requests without loading the model more than once.
+    //
+    // nemo_speech_asr_recognition_options_default() sets this to -1. A struct
+    // you zero yourself requests penalty 0 (unbiased), overriding the
+    // configured value - prefer the _default() helper.
+    //
+    // RNNT only: ignored with a one-time warning for TDT heads.
+    double blank_penalty;
 } nemo_speech_asr_recognition_options;
 
 // Zero-initialized structs with `size` set to the current sizeof, holding the

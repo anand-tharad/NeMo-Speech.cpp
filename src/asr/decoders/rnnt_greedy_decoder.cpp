@@ -51,27 +51,44 @@ RnntGreedyDecoder::RnntGreedyDecoder(RnntEngine* engine, const DecoderConfig& cf
     : engine_(engine), bias_alpha_cfg_(static_cast<float>(cfg.boosting_tree_alpha)),
       bias_depth_scaling_(static_cast<float>(cfg.boosting_depth_scaling)),
       bias_max_boost_(cfg.boosting_max_boost),
-      blank_penalty_(static_cast<float>(cfg.blank_penalty)) {
-    if (blank_penalty_ != 0.0f) {
-        const auto& rnnt_cfg = engine_->rnnt_config();
-        if (rnnt_cfg.is_tdt()) {
-            // joint_tdt_argmax takes no bias and the TDT joint tail throws on
-            // one; say so rather than silently decoding without the penalty.
+      blank_penalty_cfg_(static_cast<float>(cfg.blank_penalty)) {
+    apply_blank_penalty_(cfg.blank_penalty);
+    reset();
+}
+
+void
+RnntGreedyDecoder::apply_blank_penalty_(double penalty) {
+    blank_penalty_ = static_cast<float>(penalty);
+    blank_bias_.clear();
+    // 0 leaves blank_bias_ empty, which keeps the nullptr-bias path and its
+    // joint graph key byte-identical to a build without this option.
+    if (blank_penalty_ == 0.0f)
+        return;
+    const auto& rnnt_cfg = engine_->rnnt_config();
+    if (rnnt_cfg.is_tdt()) {
+        // joint_tdt_argmax takes no bias and the TDT joint tail throws on one;
+        // say so rather than silently decoding without the penalty. Warn once:
+        // this is reachable per request now, and a line per request is spam.
+        static std::atomic<bool> warned{false};
+        if (!warned.exchange(true)) {
             std::fprintf(
                 stderr,
                 "warning: decoder.blank_penalty is not supported for TDT models; ignoring it\n");
-            blank_penalty_ = 0.0f;
-        } else {
-            blank_bias_.assign(static_cast<size_t>(rnnt_cfg.vocab_size), 0.0f);
-            blank_bias_[static_cast<size_t>(rnnt_cfg.blank_id)] = -blank_penalty_;
         }
+        blank_penalty_ = 0.0f;
+        return;
     }
-    reset();
+    blank_bias_.assign(static_cast<size_t>(rnnt_cfg.vocab_size), 0.0f);
+    blank_bias_[static_cast<size_t>(rnnt_cfg.blank_id)] = -blank_penalty_;
 }
 
 void
 RnntGreedyDecoder::set_request_options(const AsrRequestOptions& opts) {
     set_compute_timestamps(opts.needs_word_timings());
+    // Before the speech_contexts early-return below, so the penalty applies
+    // whether or not the request carries boosting phrases.
+    apply_blank_penalty_(
+        opts.blank_penalty < 0.0 ? static_cast<double>(blank_penalty_cfg_) : opts.blank_penalty);
     bias_on_ = false;
     bias_node_ = ContextBiasingTree::kRoot;
     bias_eff_alpha_ = 1.0f;

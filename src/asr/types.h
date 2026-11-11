@@ -31,6 +31,16 @@ struct AsrRequestOptions {
     // Per-request EOU silence threshold in milliseconds; <= 0 keeps the default.
     float stop_history_eou_ms = -1.0f;
 
+    // Per-request override of DecoderConfig::blank_penalty, subtracted from the
+    // blank logit before the RNNT greedy argmax. Negative = keep the
+    // startup-configured value; 0 is a meaningful setting (unbiased decoding)
+    // so zero cannot be the sentinel. This forfeits negative penalties, which
+    // would favour blank and have no known use. RNNT only; ignored for TDT.
+    //
+    // Lets one loaded model serve several penalties across requests instead of
+    // one server process per penalty.
+    double blank_penalty = -1.0;
+
     // Tags words in the top alternative when a diarizer model is available.
     bool enable_speaker_diarization = false;
     int max_speaker_count = 8;

@@ -3,6 +3,7 @@
 // Per-stream audio buffering, encoder execution, and head decoding.
 #pragma once
 
+#include <deque>
 #include <memory>
 #include <string>
 #include <vector>
@@ -142,9 +143,16 @@ class AsrRunner {
     // before the first feed_audio. Only the cache-aware runner implements it.
     virtual void set_capture_encoding(bool /*on*/) {}
 
-    // Move out what was captured. Empty unless capture was enabled, and
-    // meaningful only once the utterance is complete.
+    // Move out the next completed utterance's encoding, or at end of stream
+    // the trailing one. Empty unless capture was enabled.
+    //
+    // Mid-stream endpointing closes utterances as it goes, so a long session
+    // yields one encoding per utterance rather than one for the whole stream.
+    // Take it right after the final it belongs to; they queue in order.
     virtual PreparedEncoding take_prepared_encoding() { return {}; }
+
+    // How many completed utterance encodings are waiting to be taken.
+    virtual size_t pending_prepared_encodings() const { return 0; }
 };
 
 // Buffered streaming over a non-cache-aware encoder.
@@ -312,6 +320,7 @@ class CacheStreamRunner final : public AsrRunner {
     void force_eou() override;
     void set_capture_encoding(bool on) override { capture_encoding_ = on; }
     PreparedEncoding take_prepared_encoding() override;
+    size_t pending_prepared_encodings() const override { return completed_encodings_.size(); }
 
     // Diagnostic accessor: copy out the prompt-conditioned joint encoder
     // projection from the most recent chunk. Returns the number of frames.
@@ -421,8 +430,14 @@ class CacheStreamRunner final : public AsrRunner {
     // chunks, so the same representation can be decoded again under different
     // decoder settings without a second encoder pass.
     bool capture_encoding_ = false;
+    // Frames of the utterance currently being decoded.
     std::vector<float> captured_enc_;
     int captured_frames_ = 0;
+    // Utterances already closed by endpointing, oldest first, each waiting to
+    // be taken by the caller that received its final.
+    std::deque<PreparedEncoding> completed_encodings_;
+    // Snapshot captured_enc_ as a completed utterance and start a new one.
+    void close_captured_utterance_();
 
     // RNNT head (null for CTC or when constructed via model_path ctor).
     // Runs the greedy emit loop on the encoder output of each chunk; per-stream

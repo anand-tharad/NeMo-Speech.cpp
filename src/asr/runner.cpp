@@ -1120,6 +1120,10 @@ CacheStreamRunner::poll_endpoint(StreamingUpdate& update, bool after_chunk) {
     if (!endpointer_->poll(now_ms, last_speech_ms))
         return false;
     force_eou_pending_ = false;
+    // Close this utterance's captured frames before publishing, so the caller
+    // that receives the final can take exactly the encoding behind it. The
+    // next utterance starts accumulating fresh.
+    close_captured_utterance_();
     // EOU publishes a hypothesis; it does not end the acoustic stream. Keep
     // encoder caches, predictor state, mel overlap and the absolute clock.
     // Flushing synthetic EOS frames and resetting here changes recognition
@@ -1237,8 +1241,34 @@ CacheStreamRunner::finalize() {
     return update;
 }
 
+void
+CacheStreamRunner::close_captured_utterance_() {
+    if (!capture_encoding_ || captured_frames_ <= 0)
+        return;
+    PreparedEncoding done;
+    done.frames = std::move(captured_enc_);
+    done.frame_count = captured_frames_;
+    done.joint_dim = model_->rnnt_config().joint_dim;
+    done.prompt_index = prompt_index_;
+    done.language_code = opts_.language_code;
+    done.audio_processed_sec = static_cast<float>(audio_base_ + audio_buf_.size()) /
+                               static_cast<float>(model_->fe_config().sample_rate);
+    completed_encodings_.push_back(std::move(done));
+    captured_enc_.clear();
+    captured_frames_ = 0;
+}
+
 PreparedEncoding
 CacheStreamRunner::take_prepared_encoding() {
+    // Utterances closed by endpointing come first, oldest first, so a caller
+    // draining finals in order gets the encoding matching each one.
+    if (!completed_encodings_.empty()) {
+        PreparedEncoding out = std::move(completed_encodings_.front());
+        completed_encodings_.pop_front();
+        return out;
+    }
+    // Otherwise the trailing utterance: whatever has accumulated since the
+    // last endpoint, which after finish() is the end-of-stream final.
     PreparedEncoding out;
     if (captured_frames_ <= 0)
         return out;
@@ -1281,6 +1311,7 @@ CacheStreamRunner::reset() {
     stream_zero_padded_ = false;
     captured_enc_.clear();
     captured_frames_ = 0;
+    completed_encodings_.clear();
     zero_caches();
     std::fill(attn_mask_.begin(), attn_mask_.end(), 0.0f);
     if (head_)

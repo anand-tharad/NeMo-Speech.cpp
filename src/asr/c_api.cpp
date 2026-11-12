@@ -30,6 +30,9 @@ struct nemo_speech_asr_stream {
 struct nemo_speech_asr_result {
     asr_core::Result value;
 };
+struct nemo_speech_asr_prepared_encoding {
+    asr_core::PreparedEncoding value;
+};
 struct nemo_speech_diar_model {
     std::shared_ptr<asr_core::Diarizer> impl;
 };
@@ -363,6 +366,68 @@ nemo_speech_asr_stream_force_endpoint(nemo_speech_asr_stream* stream) {
         stream->impl->force_endpoint();
         return NEMO_SPEECH_ASR_OK;
     });
+}
+
+nemo_speech_asr_status
+nemo_speech_asr_stream_capture_encoding(nemo_speech_asr_stream* stream, bool enable) {
+    if (!stream)
+        return NEMO_SPEECH_ASR_ERROR_INVALID_ARGUMENT;
+    return guard([&] {
+        stream->impl->capture_encoding(enable);
+        return NEMO_SPEECH_ASR_OK;
+    });
+}
+
+nemo_speech_asr_status
+nemo_speech_asr_stream_take_prepared_encoding(
+    nemo_speech_asr_stream* stream, nemo_speech_asr_prepared_encoding** out) {
+    if (!stream || !out)
+        return NEMO_SPEECH_ASR_ERROR_INVALID_ARGUMENT;
+    *out = nullptr;
+    return guard([&] {
+        auto prepared = stream->impl->take_prepared_encoding();
+        if (!prepared.valid())
+            return NEMO_SPEECH_ASR_OK;  // nothing captured; not an error
+        auto handle = std::make_unique<nemo_speech_asr_prepared_encoding>();
+        handle->value = std::move(prepared);
+        *out = handle.release();
+        return NEMO_SPEECH_ASR_OK;
+    });
+}
+
+nemo_speech_asr_status
+nemo_speech_asr_decode_prepared(
+    nemo_speech_asr_recognizer* recognizer, const nemo_speech_asr_prepared_encoding* prepared,
+    const nemo_speech_asr_recognition_options* options, nemo_speech_asr_result** out) {
+    if (!recognizer || !prepared || !out)
+        return NEMO_SPEECH_ASR_ERROR_INVALID_ARGUMENT;
+    *out = nullptr;
+    return guard([&] {
+        auto result = std::make_unique<nemo_speech_asr_result>();
+        // Language travels separately from the options struct everywhere else
+        // in this ABI; an empty tag leaves decode_prepared to fall back to the
+        // prompt the encoding was actually produced with.
+        auto opts = to_options(options);
+        opts.language_code = lang_of(options);
+        result->value = recognizer->impl->decode_prepared(prepared->value, std::move(opts));
+        *out = result.release();
+        return NEMO_SPEECH_ASR_OK;
+    });
+}
+
+int32_t
+nemo_speech_asr_prepared_encoding_frames(const nemo_speech_asr_prepared_encoding* prepared) {
+    return prepared ? prepared->value.frame_count : 0;
+}
+
+size_t
+nemo_speech_asr_prepared_encoding_size_bytes(const nemo_speech_asr_prepared_encoding* prepared) {
+    return prepared ? prepared->value.size_bytes() : 0;
+}
+
+void
+nemo_speech_asr_prepared_encoding_destroy(nemo_speech_asr_prepared_encoding* prepared) {
+    delete prepared;
 }
 
 nemo_speech_asr_status

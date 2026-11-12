@@ -39,6 +39,7 @@ extern "C" {
 typedef struct nemo_speech_asr_recognizer nemo_speech_asr_recognizer;
 typedef struct nemo_speech_asr_stream nemo_speech_asr_stream;
 typedef struct nemo_speech_asr_result nemo_speech_asr_result;
+typedef struct nemo_speech_asr_prepared_encoding nemo_speech_asr_prepared_encoding;
 
 typedef enum nemo_speech_asr_status {
     NEMO_SPEECH_ASR_OK = 0,
@@ -260,6 +261,48 @@ NEMO_SPEECH_ASR_API nemo_speech_asr_status
 nemo_speech_asr_stream_next(nemo_speech_asr_stream* stream, nemo_speech_asr_result** out);
 
 NEMO_SPEECH_ASR_API void nemo_speech_asr_stream_close(nemo_speech_asr_stream* stream);
+
+// ---- Prepared encodings (decode the same audio again, cheaply) ----
+//
+// Encoding dominates the cost of recognition; decoding is comparatively cheap.
+// A caller that wants a second hypothesis under different decoder settings --
+// a different blank penalty, typically -- can keep the encoder output and
+// decode it again instead of re-encoding the same audio.
+//
+// Usage: enable capture BEFORE pushing audio, drive the stream normally, then
+// take the encoding once the stream has finished. The handle owns host memory,
+// stays valid after its stream is closed, and may be decoded any number of
+// times. Release it with nemo_speech_asr_prepared_encoding_destroy.
+//
+// Transducer heads only. Capture costs joint_dim floats per encoder frame, so
+// it is off unless asked for.
+
+// Retain the encoder output for this stream. Call before the first push.
+NEMO_SPEECH_ASR_API nemo_speech_asr_status
+nemo_speech_asr_stream_capture_encoding(nemo_speech_asr_stream* stream, bool enable);
+
+// Move out what was captured; call after nemo_speech_asr_stream_finish. On OK,
+// *out is NULL when nothing was captured (capture was never enabled, or the
+// head is not a transducer).
+NEMO_SPEECH_ASR_API nemo_speech_asr_status nemo_speech_asr_stream_take_prepared_encoding(
+    nemo_speech_asr_stream* stream, nemo_speech_asr_prepared_encoding** out);
+
+// Decode a captured encoding under `options`, against a fresh prediction
+// network state and hypothesis buffer. The encoder does not run. `prepared` is
+// not modified and remains usable. Diarization and endpointing do not apply:
+// both describe a live stream, not a captured representation.
+NEMO_SPEECH_ASR_API nemo_speech_asr_status nemo_speech_asr_decode_prepared(
+    nemo_speech_asr_recognizer* recognizer, const nemo_speech_asr_prepared_encoding* prepared,
+    const nemo_speech_asr_recognition_options* options, nemo_speech_asr_result** out);
+
+// Encoder frames held, and the host bytes they occupy.
+NEMO_SPEECH_ASR_API int32_t
+nemo_speech_asr_prepared_encoding_frames(const nemo_speech_asr_prepared_encoding* prepared);
+NEMO_SPEECH_ASR_API size_t
+nemo_speech_asr_prepared_encoding_size_bytes(const nemo_speech_asr_prepared_encoding* prepared);
+
+NEMO_SPEECH_ASR_API void
+nemo_speech_asr_prepared_encoding_destroy(nemo_speech_asr_prepared_encoding* prepared);
 
 // ---- Result accessors (memory owned by the result; valid until destroy) ----
 //

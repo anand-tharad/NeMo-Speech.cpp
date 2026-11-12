@@ -655,6 +655,109 @@ Recognizer::recognize(
     return stream->finish();
 }
 
+void
+RecognitionStream::capture_encoding(bool on) {
+    runner_->set_capture_encoding(on);
+}
+
+PreparedEncoding
+RecognitionStream::take_prepared_encoding() {
+    auto prepared = runner_->take_prepared_encoding();
+    // Stamp provenance here rather than in the runner: the runner has no
+    // Recognizer pointer, and this is the layer that knows which one owns it.
+    if (prepared.valid())
+        prepared.owner = recognizer_;
+    return prepared;
+}
+
+Result
+Recognizer::decode_prepared(const PreparedEncoding& prepared, AsrRequestOptions opts) {
+    if (!prepared.valid())
+        throw std::invalid_argument("prepared encoding is empty or malformed");
+    if (prepared.owner != nullptr && prepared.owner != this)
+        throw std::invalid_argument(
+            "prepared encoding came from a different recognizer; its frames are "
+            "only meaningful to the joint network and vocabulary that produced them");
+    if (model_->head_kind() == HeadKind::Ctc)
+        throw std::invalid_argument("decode_prepared requires a transducer head");
+    auto* transducer = static_cast<RnntModel*>(model_.get());
+    if (prepared.joint_dim != transducer->rnnt_config().joint_dim)
+        throw std::invalid_argument("prepared encoding joint_dim does not match the model");
+
+    // A brand-new head is the whole point: fresh predictor state, fresh
+    // hypothesis buffer, no carry-over from whatever decoded this encoding
+    // before. set_request_options is what applies this request's blank penalty.
+    auto head = transducer->make_transducer_decoder(cfg_.decoder);
+    if (opts.language_code.empty())
+        opts.language_code = prepared.language_code;
+    head->set_request_options(opts);
+
+    // One pass over the whole utterance from frame 0, so word frame indices are
+    // absolute and need no offset correction.
+    auto ids = head->step(
+        prepared.frames.data(), prepared.joint_dim, prepared.frame_count, 0);
+    head->finalize();
+
+    std::string transcript;
+    std::vector<std::string> detected_languages;
+    if (!ids.empty()) {
+        append_sentencepiece_tokens(transcript, ids, head->vocab());
+        extract_appended_lang_tags(transcript, 0, detected_languages);
+    }
+    const std::string beam_text = head->final_transcript();
+    if (!beam_text.empty())
+        transcript = beam_text;
+
+    Result r;
+    r.is_final = true;
+    r.stability = 1.0f;
+    r.channel_tag = 1;
+    r.audio_processed = prepared.audio_processed_sec;
+
+    const bool want_off = opts.needs_word_timings();
+    const double ms = ms_per_enc_frame();
+    const std::string lang0 =
+        detected_languages.empty() ? std::string() : detected_languages.front();
+    std::string postproc_language = opts.language_code;
+    std::string normalized = postproc_language;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if ((normalized.empty() || normalized == "auto") && !lang0.empty())
+        postproc_language = lang0;
+
+    // The language-id token is a word to the decoder; drop it so it cannot
+    // leak into word time offsets. No-op for non-multilingual models.
+    std::vector<std::string> tag_words;
+    tag_words.reserve(detected_languages.size());
+    for (const auto& l : detected_languages) tag_words.push_back("<" + l + ">");
+
+    std::vector<WordTiming> words;
+    if (want_off) {
+        for (const auto& w : head->word_timings())
+            if (std::find(tag_words.begin(), tag_words.end(), w.word) == tag_words.end())
+                words.push_back(w);
+    }
+
+    Alternative alt;
+    // Postproc may remap spans, so it runs before frame->ms conversion.
+    alt.transcript = postproc_->apply(transcript, opts, want_off ? &words : nullptr,
+                                      postproc_language);
+    alt.confidence = head->confidence();
+    alt.language_codes.assign(detected_languages.begin(), detected_languages.end());
+    for (const auto& w : words) {
+        Word ww;
+        ww.word = w.word;
+        ww.start_time = static_cast<int32_t>(w.start_frame * ms + 0.5);
+        ww.end_time = static_cast<int32_t>(w.end_frame * ms + 0.5);
+        ww.confidence = w.confidence;
+        ww.language_code = lang0;
+        alt.words.push_back(std::move(ww));
+    }
+    r.alternatives.push_back(std::move(alt));
+    return r;
+}
+
 int
 Recognizer::sample_rate() const {
     return model_->sample_rate();

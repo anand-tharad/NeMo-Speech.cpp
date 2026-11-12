@@ -11,6 +11,7 @@
 #include "fastconformer.h"
 #include "fe.h"
 #include "model.h"
+#include "prepared_encoding.h"
 #include "parameter_parser.h"
 #include "runtime.h"
 #include "types.h"
@@ -20,6 +21,13 @@
 namespace nemo_speech::asr {
 
 struct RecognizerConfig;
+
+// Strip "<lang>" tags a prompt-conditioned model appends to the transcript,
+// collecting the codes. `old_size` is the length before the newest tokens were
+// appended, so only the tail is scanned. Shared with Recognizer so re-decoding
+// a prepared encoding applies the same rules.
+void extract_appended_lang_tags(
+    std::string& text, size_t old_size, std::vector<std::string>& detected_languages);
 
 // Defined in flashlight_decoder.h; non-flashlight builds hold it null.
 struct FlashlightResources;
@@ -127,6 +135,16 @@ class AsrRunner {
     // Finalize the current utterance on the next step, then continue the stream.
     // This works even when endpointing is disabled. Default no-op.
     virtual void force_eou() {}
+
+    // Retain the encoder output so it can be decoded again without re-encoding.
+    // Off by default: it costs joint_dim floats per encoder frame, which is
+    // wasted on the common path where one decode is all anyone wants. Call
+    // before the first feed_audio. Only the cache-aware runner implements it.
+    virtual void set_capture_encoding(bool /*on*/) {}
+
+    // Move out what was captured. Empty unless capture was enabled, and
+    // meaningful only once the utterance is complete.
+    virtual PreparedEncoding take_prepared_encoding() { return {}; }
 };
 
 // Buffered streaming over a non-cache-aware encoder.
@@ -292,6 +310,8 @@ class CacheStreamRunner final : public AsrRunner {
     std::vector<std::string> detected_languages() const override { return detected_languages_; }
     void set_request_options(const AsrRequestOptions& opts) override;
     void force_eou() override;
+    void set_capture_encoding(bool on) override { capture_encoding_ = on; }
+    PreparedEncoding take_prepared_encoding() override;
 
     // Diagnostic accessor: copy out the prompt-conditioned joint encoder
     // projection from the most recent chunk. Returns the number of frames.
@@ -396,6 +416,13 @@ class CacheStreamRunner final : public AsrRunner {
     // Encoder output from most recent chunk (column-major (d_model, T_out)).
     std::vector<float> last_enc_out_;
     int last_enc_T_ = 0;
+
+    // Optional whole-utterance capture of the above, concatenated across
+    // chunks, so the same representation can be decoded again under different
+    // decoder settings without a second encoder pass.
+    bool capture_encoding_ = false;
+    std::vector<float> captured_enc_;
+    int captured_frames_ = 0;
 
     // RNNT head (null for CTC or when constructed via model_path ctor).
     // Runs the greedy emit loop on the encoder output of each chunk; per-stream

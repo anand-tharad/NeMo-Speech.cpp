@@ -43,23 +43,6 @@ extract_lang_tags(std::string& text) {
     return langs;
 }
 
-void
-extract_appended_lang_tags(
-    std::string& text, size_t old_size, std::vector<std::string>& detected_languages) {
-    constexpr size_t kMaxLanguageTagBytes = 10;
-    const size_t scan_from = old_size > kMaxLanguageTagBytes ? old_size - kMaxLanguageTagBytes : 0;
-    std::string appended = text.substr(scan_from);
-    if (extract_lang_tags(appended).empty())
-        return;
-
-    for (auto& code : extract_lang_tags(text)) {
-        if (std::find(detected_languages.begin(), detected_languages.end(), code) ==
-            detected_languages.end()) {
-            detected_languages.push_back(std::move(code));
-        }
-    }
-}
-
 // NeMo per_feature normalization (per mel bin across frames). Bit-identical
 // to MelSpectrogramExtractor's internal normalize=true path (fe.cpp), so a
 // no-mask window matches the non-VAD infer_ctc output exactly. Used by the
@@ -180,6 +163,24 @@ make_ctc_decoder(
     return std::make_unique<GreedyCtcDecoder>(model->ctc_config(), model->vocab());
 }
 }  // namespace
+
+void
+extract_appended_lang_tags(
+    std::string& text, size_t old_size, std::vector<std::string>& detected_languages) {
+    constexpr size_t kMaxLanguageTagBytes = 10;
+    const size_t scan_from = old_size > kMaxLanguageTagBytes ? old_size - kMaxLanguageTagBytes : 0;
+    std::string appended = text.substr(scan_from);
+    if (extract_lang_tags(appended).empty())
+        return;
+
+    for (auto& code : extract_lang_tags(text)) {
+        if (std::find(detected_languages.begin(), detected_languages.end(), code) ==
+            detected_languages.end()) {
+            detected_languages.push_back(std::move(code));
+        }
+    }
+}
+
 
 BufferedStreamRunner::BufferedStreamRunner(
     CtcModel* model, const RecognizerConfig& cfg,
@@ -919,6 +920,22 @@ CacheStreamRunner::process_one_chunk() {
 
     cache_filled_frames_ = std::min(cache_filled_frames_ + last_enc_T_, left_ctx);
 
+    // Retain this chunk's frames when capture is on. Done before decoding so
+    // what is kept is exactly what the head saw, and appended rather than
+    // copied wholesale because last_enc_out_ is a reused buffer that may be
+    // larger than the frames this chunk actually produced.
+    if (capture_encoding_ && last_enc_T_ > 0) {
+        const size_t joint_dim =
+            static_cast<size_t>(model_->rnnt_config().joint_dim);
+        const size_t count = static_cast<size_t>(last_enc_T_) * joint_dim;
+        if (last_enc_out_.size() >= count) {
+            captured_enc_.insert(
+                captured_enc_.end(), last_enc_out_.begin(),
+                last_enc_out_.begin() + static_cast<ptrdiff_t>(count));
+            captured_frames_ += last_enc_T_;
+        }
+    }
+
     // If a head is attached (RNNT path), drive greedy decoding on this
     // chunk's encoder output. Accumulate emitted tokens + maintain transcript.
     if (head_ && last_enc_T_ > 0) {
@@ -1220,6 +1237,23 @@ CacheStreamRunner::finalize() {
     return update;
 }
 
+PreparedEncoding
+CacheStreamRunner::take_prepared_encoding() {
+    PreparedEncoding out;
+    if (captured_frames_ <= 0)
+        return out;
+    out.frames = std::move(captured_enc_);
+    out.frame_count = captured_frames_;
+    out.joint_dim = model_->rnnt_config().joint_dim;
+    out.prompt_index = prompt_index_;
+    out.language_code = opts_.language_code;
+    out.audio_processed_sec = static_cast<float>(audio_base_ + audio_buf_.size()) /
+                              static_cast<float>(model_->fe_config().sample_rate);
+    captured_enc_.clear();
+    captured_frames_ = 0;
+    return out;
+}
+
 void
 CacheStreamRunner::reset() {
     audio_buf_.clear();
@@ -1245,6 +1279,8 @@ CacheStreamRunner::reset() {
     finalizing_ = false;
     first_chunk_ = true;
     stream_zero_padded_ = false;
+    captured_enc_.clear();
+    captured_frames_ = 0;
     zero_caches();
     std::fill(attn_mask_.begin(), attn_mask_.end(), 0.0f);
     if (head_)

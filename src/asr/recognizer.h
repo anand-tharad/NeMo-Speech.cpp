@@ -16,6 +16,7 @@
 #include "diar/diar_pipeline.h"
 #include "parameter_parser.h"
 #include "postproc/pipeline.h"
+#include "prepared_encoding.h"
 #include "runner.h"
 #include "runtime.h"
 #include "types.h"
@@ -86,6 +87,14 @@ class RecognitionStream {
     // No more audio: flush the tail and return the end-of-stream final Result.
     Result finish();
 
+    // Retain the encoder output so Recognizer::decode_prepared can decode it
+    // again without re-encoding. Call before the first push; it costs
+    // joint_dim floats per encoder frame.
+    void capture_encoding(bool on);
+    // Move out what was captured. Call after finish(); empty if capture was
+    // never enabled or the head is not a transducer.
+    PreparedEncoding take_prepared_encoding();
+
     const AsrRequestOptions& options() const { return opts_; }
     // Interim results also carry word timings (when requested) and speaker tags.
     void set_interim_words(bool on) { interim_words_ = on; }
@@ -136,6 +145,17 @@ class Recognizer {
     Result recognize(
         const float* samples, size_t n, AsrRequestOptions opts, const std::string& language_code,
         int sample_rate = 0);
+
+    // Decode an already-encoded utterance again under different decoder
+    // options, most usefully a different blank penalty. The encoder does not
+    // run: this is the decode half only, against a fresh predictor state and
+    // hypothesis buffer, so it cannot be influenced by any earlier decode of
+    // the same encoding.
+    //
+    // `prepared` is const and stays reusable. Diarization and endpointing do
+    // not apply -- both are properties of a live stream, not of a captured
+    // representation -- so results carry no speaker tags.
+    Result decode_prepared(const PreparedEncoding& prepared, AsrRequestOptions opts);
 
     // Construct a buffered CTC or cache-aware transducer streaming runner.
     std::unique_ptr<AsrRunner> make_runner() const;

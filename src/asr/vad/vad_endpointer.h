@@ -60,6 +60,16 @@ class VadEndpointer {
     // restoring the configured threshold.
     void set_stop_history_eou_ms(float ms) { override_ms_ = ms; }
 
+    // Per-request override of `enable`: 1 on, 0 off, negative restores the
+    // configured value. One loaded model therefore serves a batch caller that
+    // wants a single final per request and a live caller that wants one per
+    // utterance, without a second copy of the weights.
+    void set_enable_override(int state) { enable_override_ = state; }
+
+    bool enabled() const {
+        return enable_override_ < 0 ? cfg_.enable : enable_override_ != 0;
+    }
+
     // Effective threshold: per-request override when set, else the configured value.
     float stop_history_eou_ms() const {
         return override_ms_ > 0.0f ? override_ms_ : cfg_.stop_history_eou_ms;
@@ -70,6 +80,7 @@ class VadEndpointer {
    private:
     VadEndpointerCfg cfg_;
     float override_ms_ = -1.0f;    // <= 0 = no per-request override
+    int enable_override_ = -1;     // < 0 = no per-request override
     double last_speech_ms_ = 0.0;  // max last_speech_ms observed
     bool armed_ = false;           // speech seen since the last fire
     bool forced_ = false;          // force() pending

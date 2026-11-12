@@ -17,7 +17,7 @@ VadEndpointer::poll(double now_ms, double last_speech_ms) {
         armed_ = false;
         return true;
     }
-    if (!cfg_.enable || !armed_)
+    if (!enabled() || !armed_)
         return false;
     if (now_ms - last_speech_ms_ >= stop_history_eou_ms()) {
         armed_ = false;  // latch until speech resumes

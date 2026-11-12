@@ -219,6 +219,8 @@ to_options(const nemo_speech_asr_recognition_options* o) {
     // the decoder. Only an absent field (older, smaller struct) inherits.
     if (HAS_FIELD(o, nemo_speech_asr_recognition_options, blank_penalty))
         opts.blank_penalty = o->blank_penalty;
+    if (HAS_FIELD(o, nemo_speech_asr_recognition_options, enable_endpointing))
+        opts.enable_endpointing = o->enable_endpointing;
     if (HAS_FIELD(o, nemo_speech_asr_recognition_options, speech_context_count) &&
         o->speech_contexts) {
         for (size_t i = 0; i < o->speech_context_count; ++i) {
@@ -280,6 +282,9 @@ nemo_speech_asr_recognition_options_default(void) {
     // Negative = inherit the recognizer's configured blank_penalty. Zero is a
     // real setting (unbiased), so it cannot double as "unset".
     o.blank_penalty = -1.0;
+    // Negative = inherit the recognizer's endpointing setting. Zero is a real
+    // setting (off), so it cannot double as "unset".
+    o.enable_endpointing = -1;
     return o;
 }
 

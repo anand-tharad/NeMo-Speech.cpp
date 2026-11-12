@@ -31,6 +31,15 @@ struct AsrRequestOptions {
     // Per-request EOU silence threshold in milliseconds; <= 0 keeps the default.
     float stop_history_eou_ms = -1.0f;
 
+    // Per-request override of endpointing: 1 on, 0 off, negative keeps the
+    // configured value. The threshold above tunes endpointing; this turns it
+    // on and off, which previously could only be done at startup.
+    //
+    // Without it, one recognizer cannot serve both a batch caller wanting a
+    // single final per request and a live caller wanting one per utterance --
+    // they would need separate processes and separate copies of the weights.
+    int enable_endpointing = -1;
+
     // Per-request override of DecoderConfig::blank_penalty, subtracted from the
     // blank logit before the RNNT greedy argmax. Negative = keep the
     // startup-configured value; 0 is a meaningful setting (unbiased decoding)

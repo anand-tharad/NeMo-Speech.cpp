@@ -222,6 +222,7 @@ BufferedStreamRunner::set_request_options(const AsrRequestOptions& opts) {
         head_->set_request_options(opts);
     if (endpointer_)
         endpointer_->set_stop_history_eou_ms(opts.stop_history_eou_ms);
+        endpointer_->set_enable_override(opts.enable_endpointing);
 }
 
 void
@@ -835,6 +836,7 @@ CacheStreamRunner::set_request_options(const AsrRequestOptions& opts) {
         head_->set_request_options(opts);
     if (endpointer_)
         endpointer_->set_stop_history_eou_ms(opts.stop_history_eou_ms);
+        endpointer_->set_enable_override(opts.enable_endpointing);
 }
 
 void

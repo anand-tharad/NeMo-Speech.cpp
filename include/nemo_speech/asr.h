@@ -211,6 +211,12 @@ typedef struct nemo_speech_asr_recognition_options {
     //
     // RNNT only: ignored with a one-time warning for TDT heads.
     double blank_penalty;
+    // Per-request endpointing: 1 on, 0 off, negative keeps the recognizer's
+    // configured value. The recognizer's endpointing_config.stop_history_eou_ms
+    // tunes it; this turns it on and off, so one recognizer can serve a batch
+    // caller wanting one final per request and a live caller wanting one per
+    // utterance.
+    int32_t enable_endpointing;
 } nemo_speech_asr_recognition_options;
 
 // Zero-initialized structs with `size` set to the current sizeof, holding the
